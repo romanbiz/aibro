@@ -1,0 +1,121 @@
+// ==UserScript==
+// @name         Gemini Background Notifier (Final + Focus Check)
+// @namespace    http://tampermonkey.net/
+// @version      1.5
+// @description  Уведомляет о завершении ответа Gemini, если вкладка не в фокусе
+// @author       Gemini
+// @match        https://gemini.google.com/*
+// @icon         https://www.google.com/s2/favicons?sz=64&domain=google.com
+// @grant        GM_notification
+// @run-at       document-start
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // Конфигурация
+    const CONFIG = {
+        targetUrls: ['/StreamGenerate', '/generateAnswer'],
+        cooldown: 5000, // 5 секунд паузы между уведомлениями (защита от спама)
+        debug: true     // Выводить ли логи в консоль (F12)
+    };
+
+    let lastNotificationTime = 0;
+
+    function log(...args) {
+        if (CONFIG.debug) {
+            console.log("%c[Gemini Notifier]", "color: #00ffff; font-weight: bold; background: #000; padding: 2px 5px; border-radius: 3px;", ...args);
+        }
+    }
+
+    function sendPushNotification() {
+        log("🔔 ОТПРАВКА СИСТЕМНОГО УВЕДОМЛЕНИЯ...");
+        GM_notification({
+            title: "Gemini",
+            text: "Нейросеть закончила думать. Ответ готов!",
+            timeout: 7000, // Висит 7 секунд
+            onclick: () => {
+                window.focus(); // При клике на пуш возвращаем фокус на вкладку
+                log("🖱 Клик по уведомлению: фокус на вкладку.");
+            }
+        });
+    }
+
+    function isTargetUrl(url) {
+        if (!url) return false;
+        const urlStr = typeof url === 'string' ? url : (url?.url || '');
+        return CONFIG.targetUrls.some(target => urlStr.includes(target));
+    }
+
+    function handleStreamComplete() {
+        const now = Date.now();
+
+        // Защита от дребезга (если Google закроет поток несколько раз подряд)
+        if (now - lastNotificationTime < CONFIG.cooldown) {
+            return;
+        }
+
+        log("✅ Поток данных закрыт (генерация завершена).");
+
+        // ПРОВЕРКА: Если вкладка скрыта (hidden) ИЛИ окно не в фокусе (hasFocus == false)
+        const isHidden = document.hidden;
+        const hasFocus = document.hasFocus();
+
+        if (isHidden || !hasFocus) {
+            log(`👀 Пользователь отвлечен (Скрыто: ${isHidden}, В фокусе: ${hasFocus}). Шлем пуш!`);
+            sendPushNotification();
+            lastNotificationTime = now;
+        } else {
+            log("🛑 Вы сейчас смотрите на эту вкладку. Уведомление не требуется.");
+        }
+    }
+
+    // ==========================================
+    // 1. ПЕРЕХВАТ FETCH (Для современных запросов)
+    // ==========================================
+    const originalFetch = window.fetch;
+    window.fetch = async function(...args) {
+        const response = await originalFetch.apply(this, args);
+        const url = args[0];
+
+        if (isTargetUrl(url)) {
+            log("🎯 Пойман Fetch-запрос генерации.");
+            try {
+                const clone = response.clone();
+                // .text() дождется полной загрузки всего тела ответа
+                clone.text().then(handleStreamComplete).catch(e => log("Ошибка чтения стрима Fetch", e));
+            } catch(e) {
+                log("Ошибка клонирования Fetch", e);
+            }
+        }
+        return response;
+    };
+
+    // ==========================================
+    // 2. ПЕРЕХВАТ XMLHttpRequest (Для фонового RPC)
+    // ==========================================
+    const originalXhrOpen = XMLHttpRequest.prototype.open;
+    const originalXhrSend = XMLHttpRequest.prototype.send;
+
+    XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+        this._reqUrl = url;
+        return originalXhrOpen.apply(this, [method, url, ...rest]);
+    };
+
+    XMLHttpRequest.prototype.send = function(...args) {
+        if (isTargetUrl(this._reqUrl)) {
+            log("🎯 Пойман XHR-запрос генерации.");
+
+            // Событие срабатывает при каждом изменении состояния запроса
+            this.addEventListener('readystatechange', function() {
+                // readyState 4 = запрос полностью выполнен
+                if (this.readyState === 4) {
+                    handleStreamComplete();
+                }
+            });
+        }
+        return originalXhrSend.apply(this, args);
+    };
+
+    log("🚀 Скрипт запущен. Перехватчики Fetch и XHR активны.");
+})();
