@@ -1,0 +1,95 @@
+// ==UserScript==
+// @name         Qwen Chat Notifier (Universal: First & Next messages)
+// @namespace    http://tampermonkey.net/
+// @version      2.1
+// @description  Уведомляет о завершении любого ответа в Qwen Chat (v2 API)
+// @author       Gemini
+// @match        https://chat.qwen.ai/*
+// @grant        GM_notification
+// @grant        unsafeWindow
+// @run-at       document-start
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // Эта проверка теперь ловит И "chats/[ID]", И "chat/completions"
+    const QWEN_API_PATTERN = /\/api\/v2\/chat(s\/[0-9a-f-]{32,})|(\/completions)/i;
+
+    const CONFIG = {
+        cooldown: 4000, // Пауза 4 сек, чтобы не частило
+        debug: true     // Оставляю логи, чтобы ты видел работу в консоли
+    };
+
+    let lastNotificationTime = 0;
+
+    function log(...args) {
+        if (CONFIG.debug) {
+            console.log("%c[Qwen Notifier]", "color: #ff5722; font-weight: bold; background: #fff; padding: 2px 5px; border-radius: 3px; border: 1px solid #ff5722;", ...args);
+        }
+    }
+
+    function sendPush() {
+        GM_notification({
+            title: "Qwen AI",
+            text: "Нейросеть закончила отвечать!",
+            timeout: 5000,
+            onclick: () => (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window).focus()
+        });
+    }
+
+    function handleComplete(url) {
+        const now = Date.now();
+        if (now - lastNotificationTime < CONFIG.cooldown) return;
+
+        log("✅ Ответ полностью готов!");
+
+        // Проверяем: если ты не на этой вкладке или браузер свернут
+        if (document.hidden || !document.hasFocus()) {
+            log("🔔 Отправляю пуш-уведомление.");
+            sendPush();
+            lastNotificationTime = now;
+        } else {
+            log("🛑 Ты смотришь в чат, уведомление не нужно.");
+        }
+    }
+
+    const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+
+    // --- ПЕРЕХВАТ FETCH ---
+    const originalFetch = win.fetch;
+    win.fetch = async function(...args) {
+        const url = (typeof args[0] === 'string' ? args[0] : args[0]?.url) || '';
+        const response = await originalFetch.apply(this, args);
+
+        if (QWEN_API_PATTERN.test(url)) {
+            log("🎯 Поймал нужный запрос (генерация):", url.includes('completions') ? 'Продолжение' : 'Начало чата');
+
+            const clone = response.clone();
+            clone.text()
+                .then(() => handleComplete(url))
+                .catch(() => {});
+        }
+
+        return response;
+    };
+
+    // --- ПЕРЕХВАТ XMLHttpRequest ---
+    const originalXhrOpen = win.XMLHttpRequest.prototype.open;
+    const originalXhrSend = win.XMLHttpRequest.prototype.send;
+
+    win.XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+        this._reqUrl = url;
+        return originalXhrOpen.apply(this, [method, url, ...rest]);
+    };
+
+    win.XMLHttpRequest.prototype.send = function(...args) {
+        if (this._reqUrl && QWEN_API_PATTERN.test(this._reqUrl)) {
+            log("🎯 Поймал нужный запрос (XHR):", this._reqUrl.includes('completions') ? 'Продолжение' : 'Начало чата');
+            this.addEventListener('load', () => handleComplete(this._reqUrl));
+        }
+        return originalXhrSend.apply(this, args);
+    };
+
+    log("🚀 Скрипт 2.1 запущен. Теперь работает для всех сообщений.");
+})();
